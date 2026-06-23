@@ -1,0 +1,25 @@
+moveit_setup_assistant_config:
+  urdf:
+    package: eyou_ros2_control
+    relative_path: urdf/eyou_motor.urdf
+  srdf:
+    relative_path: config/eyou_arm.srdf
+  package_settings:
+    author_name: ycn
+    author_email: 2422581995@qq.com
+    generated_timestamp: 1782097828
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity
+  modified_urdf:
+    xacros:
+      - control_xacro
+  control_xacro:
+    command:
+      - position
+    state:
+      - position
+      - velocity

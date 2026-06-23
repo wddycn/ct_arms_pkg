@@ -1,0 +1,7 @@
+<library path="libeyou_system_plugin">
+  <class name="eyou_ros2_control/EyouSystem"
+         type="eyou_ros2_control::EyouSystem"
+         base_class_type="hardware_interface::SystemInterface">
+    <description>Dual 6DOF arm CAN hardware interface for ros2_control</description>
+  </class>
+</library>
