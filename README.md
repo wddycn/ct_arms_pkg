@@ -41,9 +41,13 @@ colcon build
 source ros2_ws/install/setup.bash
 ros2 launch eyou_ros2_control eyou_control.launch.py 
 ```
-启动成功后，正常情况下机械臂会在当前（任意）姿态固定并使能（变硬）
+启动成功后，正常情况下机械臂会在当前（任意）姿态固定并使能（变硬）;
 
 ![alt text](91599d4d8ebfb14922409f41f538f105.jpg)
+
+正常情况下 can模块红绿灯闪烁，若没有可尝试重新启动
+
+![alt text](5aca9e5c262b69530f4b8e04b36ddc41.jpg)
 
 新建终端，输入以下命令进行机械臂角度控制（角度可更改，单位：rad）
 ```bash
@@ -58,6 +62,8 @@ ros2 topic pub --once /left_arm_controller/joint_trajectory trajectory_msgs/msg/
     }
   ]
 }'
+```
+```bash
 # 右臂控制
 ros2 topic pub --once /right_arm_controller/joint_trajectory trajectory_msgs/msg/JointTrajectory '
 {
@@ -126,6 +132,8 @@ ros2 topic pub --once /left_arm_controller/joint_trajectory trajectory_msgs/msg/
     }
   ]
 }'
+```
+```bash
 # 右臂控制
 ros2 topic pub --once /right_arm_controller/joint_trajectory trajectory_msgs/msg/JointTrajectory '
 {
