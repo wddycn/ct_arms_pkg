@@ -12,13 +12,24 @@ EyouSystem::EyouSystem()
 hardware_interface::CallbackReturn EyouSystem::on_init(
   const hardware_interface::HardwareInfo & info)
 {
-  (void)info; // 屏蔽未使用参数警告
-  // 固定12个关节标准顺序，强制覆盖
-  std::vector<std::string> fixed_joint_order = {
+  if (hardware_interface::SystemInterface::on_init(info) !=
+      hardware_interface::CallbackReturn::SUCCESS)
+  {
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  const std::vector<std::string> expected_joint_order = {
     "joint1", "joint2", "joint3", "joint4", "joint5", "joint6",
     "joint7", "joint8", "joint9", "joint10", "joint11", "joint12"
   };
-  joint_num_ = fixed_joint_order.size();
+  if (info.joints.size() != expected_joint_order.size())
+  {
+    RCLCPP_ERROR(
+      rclcpp::get_logger("eyou_hw"), "Expected 12 joints, got %zu", info.joints.size());
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+
+  joint_num_ = info.joints.size();
 
   joint_names_.resize(joint_num_);
   joint_pos_state_.resize(joint_num_, 0.0);
@@ -26,10 +37,17 @@ hardware_interface::CallbackReturn EyouSystem::on_init(
   joint_vel_state_.resize(joint_num_, 0.0);
   joint_eff_state_.resize(joint_num_, 0.0);
 
-  // 赋值固定顺序
-  for(size_t i=0; i<joint_num_; i++)
+  for (size_t i = 0; i < joint_num_; ++i)
   {
-    joint_names_[i] = fixed_joint_order[i];
+    joint_names_[i] = info.joints[i].name;
+    if (joint_names_[i] != expected_joint_order[i])
+    {
+      RCLCPP_ERROR(
+        rclcpp::get_logger("eyou_hw"),
+        "Joint %zu must be '%s', got '%s'",
+        i, expected_joint_order[i].c_str(), joint_names_[i].c_str());
+      return hardware_interface::CallbackReturn::ERROR;
+    }
     RCLCPP_INFO(rclcpp::get_logger("eyou_hw"), "Register joint: %s", joint_names_[i].c_str());
   }
 
@@ -81,7 +99,14 @@ hardware_interface::CallbackReturn EyouSystem::on_activate(
     RCLCPP_ERROR(rclcpp::get_logger("eyou_hw"), "CAN or motor enable failed");
     return hardware_interface::CallbackReturn::ERROR;
   }
-  read_all_motor_pos(joint_pos_state_, joint_vel_state_, joint_eff_state_);
+  if (!read_all_motor_states(joint_pos_state_, joint_vel_state_, joint_eff_state_))
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("eyou_hw"), "Failed to read initial motor states");
+    disconnect_motor_bus();
+    return hardware_interface::CallbackReturn::ERROR;
+  }
+  joint_pos_cmd_ = joint_pos_state_;
+  has_sent_pos_cmd_ = false;
 
   RCLCPP_INFO(rclcpp::get_logger("eyou_hw"), "All 12 motors online");
   return hardware_interface::CallbackReturn::SUCCESS;
@@ -101,7 +126,11 @@ hardware_interface::return_type EyouSystem::read(
 {
   (void)time;
   (void)period;
-  read_all_motor_pos(joint_pos_state_, joint_vel_state_, joint_eff_state_);
+  if (!read_all_motor_states(joint_pos_state_, joint_vel_state_, joint_eff_state_))
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("eyou_hw"), "Failed to read one or more motor states");
+    return hardware_interface::return_type::ERROR;
+  }
   return hardware_interface::return_type::OK;
 }
 
@@ -110,14 +139,23 @@ hardware_interface::return_type EyouSystem::write(
 {
   (void)time;
   (void)period;
-  send_all_motor_target(joint_pos_cmd_);
+  if (!send_all_motor_targets(joint_pos_cmd_))
+  {
+    RCLCPP_ERROR(rclcpp::get_logger("eyou_hw"), "Failed to send one or more motor targets");
+    return hardware_interface::return_type::ERROR;
+  }
   return hardware_interface::return_type::OK;
 }
 
 bool EyouSystem::connect_motor_bus()
 {
-  can_left_.bringUpCAN(1000000);
-  bool left_ok = true;
+  bool left_ok = can_left_.openSocket();
+  if (!left_ok)
+  {
+    RCLCPP_ERROR(
+      rclcpp::get_logger("eyou_hw"),
+      "Cannot open can1. Configure and bring up the CAN interface before launching.");
+  }
   for(uint8_t mid : left_motor_ids_)
   {
     if(!can_left_.enableMotor(mid))
@@ -128,8 +166,13 @@ bool EyouSystem::connect_motor_bus()
   }
   left_ready_ = left_ok;
 
-  can_right_.bringUpCAN(1000000);
-  bool right_ok = true;
+  bool right_ok = can_right_.openSocket();
+  if (!right_ok)
+  {
+    RCLCPP_ERROR(
+      rclcpp::get_logger("eyou_hw"),
+      "Cannot open can2. Configure and bring up the CAN interface before launching.");
+  }
   for(uint8_t mid : right_motor_ids_)
   {
     if(!can_right_.enableMotor(mid))
@@ -147,46 +190,59 @@ void EyouSystem::disconnect_motor_bus()
 {
   for(uint8_t mid : left_motor_ids_)
     can_left_.disableMotor(mid);
-  can_left_.bringDownCAN();
+  can_left_.closeSocket();
 
   for(uint8_t mid : right_motor_ids_)
     can_right_.disableMotor(mid);
-  can_right_.bringDownCAN();
+  can_right_.closeSocket();
 }
 
-void EyouSystem::read_all_motor_pos(std::vector<double>& pos_rad,
-                                    std::vector<double>& vel_rad,
-                                    std::vector<double>& eff)
+bool EyouSystem::read_all_motor_states(std::vector<double>& pos_rad,
+                                       std::vector<double>& vel_rad,
+                                       std::vector<double>& eff)
 {
+  bool all_ok = true;
   // 左臂 joint1~joint6
   for(size_t i=0; i<6; i++)
   {
     uint8_t mid = left_motor_ids_[i];
-    double deg = can_left_.readPosition(mid);
-    double deg_per_sec = can_left_.readSpeed(mid);
-    double torque = can_left_.readTorque(mid);
+    const double position = can_left_.readPosition(mid);
+    const double velocity = can_left_.readSpeed(mid);
+    const double torque = can_left_.readTorque(mid);
 
-    pos_rad[i] = deg2rad(deg);
-    vel_rad[i] = deg2rad(deg_per_sec);
-    eff[i] = torque;
+    if (std::isfinite(position)) pos_rad[i] = position; else all_ok = false;
+    if (std::isfinite(velocity)) vel_rad[i] = velocity; else all_ok = false;
+    if (std::isfinite(torque)) eff[i] = torque; else all_ok = false;
   }
   // 右臂 joint7~joint12
   for(size_t i=0; i<6; i++)
   {
     uint8_t mid = right_motor_ids_[i];
-    double deg = can_right_.readPosition(mid);
-    double deg_per_sec = can_left_.readSpeed(mid);
-    double torque = can_left_.readTorque(mid);
+    const double position = can_right_.readPosition(mid);
+    const double velocity = can_right_.readSpeed(mid);
+    const double torque = can_right_.readTorque(mid);
 
-    pos_rad[6 + i] = deg2rad(deg);
-    vel_rad[6 + i] = deg2rad(deg_per_sec);
-    eff[6 + i] = torque;
+    if (std::isfinite(position)) pos_rad[6 + i] = position; else all_ok = false;
+    if (std::isfinite(velocity)) vel_rad[6 + i] = velocity; else all_ok = false;
+    if (std::isfinite(torque)) eff[6 + i] = torque; else all_ok = false;
   }
+  return all_ok;
 }
 
-void EyouSystem::send_all_motor_target(const std::vector<double>& cmd_rad)
+bool EyouSystem::send_all_motor_targets(const std::vector<double>& cmd_rad)
 {
-  if(!left_ready_ || !right_ready_) return;
+  if (!left_ready_ || !right_ready_ || cmd_rad.size() != joint_num_)
+  {
+    return false;
+  }
+  for (const double command : cmd_rad)
+  {
+    if (!std::isfinite(command)) return false;
+  }
+  if (has_sent_pos_cmd_ && cmd_rad == last_sent_pos_cmd_)
+  {
+    return true;
+  }
 
   std::vector<double> spd = {0.5,0.5,0.5,0.5,0.5,0.5};
   std::vector<float> trq = {5.0f,5.0f,5.0f,5.0f,2.0f,2.0f};
@@ -194,10 +250,19 @@ void EyouSystem::send_all_motor_target(const std::vector<double>& cmd_rad)
   std::vector<double> dec = {8.0,8.0,8.0,8.0,8.0,8.0};
 
   std::vector<double> left_target(cmd_rad.begin(), cmd_rad.begin()+6);
-  can_left_.setProfilePositionMulti(left_motor_ids_, left_target, spd, trq, acc, dec);
+  const bool left_ok =
+    can_left_.setProfilePositionMulti(left_motor_ids_, left_target, spd, trq, acc, dec);
 
   std::vector<double> right_target(cmd_rad.begin()+6, cmd_rad.end());
-  can_right_.setProfilePositionMulti(right_motor_ids_, right_target, spd, trq, acc, dec);
+  const bool right_ok =
+    can_right_.setProfilePositionMulti(right_motor_ids_, right_target, spd, trq, acc, dec);
+  if (left_ok && right_ok)
+  {
+    last_sent_pos_cmd_ = cmd_rad;
+    has_sent_pos_cmd_ = true;
+    return true;
+  }
+  return false;
 }
 
 }  // namespace eyou_ros2_control

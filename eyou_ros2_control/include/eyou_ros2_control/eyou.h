@@ -18,7 +18,8 @@
 #include <cstdint>
 #include <thread>
 #include <chrono>
-#include "vector"
+#include <limits>
+#include <vector>
 #include <fcntl.h>
 #include <sys/select.h>
 
@@ -134,6 +135,7 @@ public:
             close(socket_fd_);
             socket_fd_ = -1;
         }
+        profile_position_configured_ = false;
     }
 
     /* =========================================================
@@ -194,19 +196,15 @@ public:
 
         while (true)
         {
-            if (!receiveFrame(frame, timeout_ms))
+            const auto now = std::chrono::steady_clock::now();
+            const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+                now - start).count();
+            const int remaining_ms = timeout_ms - static_cast<int>(elapsed);
+            if (remaining_ms <= 0 || !receiveFrame(frame, remaining_ms))
                 return false;
 
-            if (frame.can_id == expected_id)
+            if ((frame.can_id & CAN_SFF_MASK) == expected_id)
                 return true;
-
-            auto now = std::chrono::steady_clock::now();
-            int elapsed =
-                std::chrono::duration_cast<std::chrono::milliseconds>(
-                    now - start).count();
-
-            if (elapsed > timeout_ms)
-                return false;
         }
     }
     /* =========================================================
@@ -235,7 +233,7 @@ public:
 
         // 等待反馈
         struct can_frame recv_frame {};
-        if (!receiveFrame(recv_frame, motor_id))
+        if (!receiveFrameID(recv_frame, motor_id))
         {
             std::cerr << "[MotorCAN] No response from motor\n";
             return false;
@@ -280,7 +278,7 @@ public:
 
         // 等待反馈
         struct can_frame recv_frame {};
-        if (!receiveFrame(recv_frame, motor_id))
+        if (!receiveFrameID(recv_frame, motor_id))
         {
             std::cerr << "[MotorCAN] No response from motor\n";
             return false;
@@ -317,7 +315,7 @@ public:
     double readPosition(uint8_t motor_id)
     {
         if (!openSocket())
-            return false;
+            return std::numeric_limits<double>::quiet_NaN();
 
         uint8_t tx_data[8] = {
             0x03, 0x07,
@@ -326,16 +324,16 @@ public:
         };
 
         if (!sendFrame(motor_id, tx_data, 8))
-            return false;
+            return std::numeric_limits<double>::quiet_NaN();
 
         struct can_frame rx_frame {};
-        if (!receiveFrame(rx_frame, motor_id))
-            return false;
+        if (!receiveFrameID(rx_frame, motor_id))
+            return std::numeric_limits<double>::quiet_NaN();
 
         if (rx_frame.can_dlc < 6 ||
             rx_frame.data[0] != 0x04 ||
             rx_frame.data[1] != 0x07)
-            return false;
+            return std::numeric_limits<double>::quiet_NaN();
 
         /* ---------- 脉冲解析 ---------- */
         uint32_t angle_pulses =
@@ -367,7 +365,7 @@ public:
     double readSpeed(uint8_t motor_id)
     {
         if (!openSocket())
-            return 0.0; // 失败返回 0.0
+            return std::numeric_limits<double>::quiet_NaN();
 
         uint8_t tx_data[8] = {
             0x03, 0x06,
@@ -376,31 +374,27 @@ public:
         };
 
         if (!sendFrame(motor_id, tx_data, 8))
-            return 0.0;
+            return std::numeric_limits<double>::quiet_NaN();
 
         struct can_frame rx_frame {};
-        if (!receiveFrame(rx_frame, motor_id))
-            return 0.0;
-
-        // 建议：增加 ID 校验，防止收到其他电机的回复
-        if (rx_frame.can_id != motor_id) {
-            return 0.0;
-        }
+        if (!receiveFrameID(rx_frame, motor_id))
+            return std::numeric_limits<double>::quiet_NaN();
 
         if (rx_frame.can_dlc < 6 ||
             rx_frame.data[0] != 0x04 ||
             rx_frame.data[1] != 0x06)
         {
-            return 0.0;
+            return std::numeric_limits<double>::quiet_NaN();
         }
 
         /* ---------- 脉冲解析 (关键修改) ---------- */
         // 使用 int32_t 接收，这样如果最高位是 1 (负数)，它会被正确解析为负值
-        int32_t speed_param =
-            (static_cast<int32_t>(rx_frame.data[2]) << 24) |
-            (static_cast<int32_t>(rx_frame.data[3]) << 16) |
-            (static_cast<int32_t>(rx_frame.data[4]) << 8)  |
-            (static_cast<int32_t>(rx_frame.data[5]));
+        const uint32_t speed_bits =
+            (static_cast<uint32_t>(rx_frame.data[2]) << 24) |
+            (static_cast<uint32_t>(rx_frame.data[3]) << 16) |
+            (static_cast<uint32_t>(rx_frame.data[4]) << 8)  |
+            static_cast<uint32_t>(rx_frame.data[5]);
+        const int32_t speed_param = static_cast<int32_t>(speed_bits);
 
         /* ---------- 单位转换 ---------- */
         // 原始公式: rpm = param * 60 / 65536
@@ -453,7 +447,7 @@ public:
 
         /* ---------- 2. 接收反馈 ---------- */
         struct can_frame rx_frame {};
-        if (!receiveFrame(rx_frame, motor_id))
+        if (!receiveFrameID(rx_frame, motor_id))
             return INT32_MIN;
 
         /* ---------- 3. 校验响应 ---------- */
@@ -464,11 +458,12 @@ public:
         }
 
         /* ---------- 4. 解析 int32 (大端 + 有符号) ---------- */
-        int32_t raw_val =
-            (static_cast<int32_t>(rx_frame.data[2]) << 24) |
-            (static_cast<int32_t>(rx_frame.data[3]) << 16) |
-            (static_cast<int32_t>(rx_frame.data[4]) << 8)  |
-            (static_cast<int32_t>(rx_frame.data[5]));
+        const uint32_t raw_bits =
+            (static_cast<uint32_t>(rx_frame.data[2]) << 24) |
+            (static_cast<uint32_t>(rx_frame.data[3]) << 16) |
+            (static_cast<uint32_t>(rx_frame.data[4]) << 8)  |
+            static_cast<uint32_t>(rx_frame.data[5]);
+        const int32_t raw_val = static_cast<int32_t>(raw_bits);
 
         return raw_val;
     }
@@ -529,7 +524,7 @@ public:
             return false;
 
         struct can_frame rx_frame {};
-        if (!receiveFrame(rx_frame, motor_id) ||
+        if (!receiveFrameID(rx_frame, motor_id) ||
             rx_frame.can_dlc < 3 ||
             rx_frame.data[0] != 0x02 ||
             rx_frame.data[1] != 0x0F ||
@@ -554,7 +549,7 @@ public:
         if (!sendFrame(motor_id, speed_cmd, 8))
             return false;
 
-        if (!receiveFrame(rx_frame, motor_id) ||
+        if (!receiveFrameID(rx_frame, motor_id) ||
             rx_frame.can_dlc < 3 ||
             rx_frame.data[0] != 0x02 ||
             rx_frame.data[1] != 0x09 ||
@@ -588,16 +583,6 @@ public:
 
         struct can_frame rx {};
 
-        /* --- 辅助宏：安全的大端序转换 (32-bit Signed) --- */
-        #define TO_BIG_ENDIAN_BYTES(val, arr, offset) \
-            do { \
-                uint32_t uval = static_cast<uint32_t>(val); \
-                arr[offset]   = (uval >> 24) & 0xFF; \
-                arr[offset+1] = (uval >> 16) & 0xFF; \
-                arr[offset+2] = (uval >> 8)  & 0xFF; \
-                arr[offset+3] = (uval)       & 0xFF; \
-            } while(0)
-
         /* --- 辅助函数：获取额定扭矩 (避免代码重复) --- */
         auto getRatedTorque = [](uint8_t id) -> float {
             switch (id) {
@@ -614,7 +599,7 @@ public:
         // 这里保持你原代码的 0x01，如果实际设备需要 0x04 请自行调整。
         uint8_t mode_cmd[8] = {0x01, 0x0F, 0, 0, 0, 0x01, 0, 0}; 
         if (!sendFrame(motor_id, mode_cmd, 8)) return false;
-        if (!receiveFrame(rx, motor_id)) return false;
+        if (!receiveFrameID(rx, motor_id)) return false;
         if (rx.data[0]!=0x02 || rx.data[1]!=0x0F || rx.data[2]!=0x01)
             return false;
 
@@ -623,10 +608,10 @@ public:
         int32_t speed_value = static_cast<int32_t>(std::round(speed_rpm * 1092.0));
         
         uint8_t speed_cmd[8] = {0x01, 0x09, 0, 0, 0, 0, 0, 0};
-        TO_BIG_ENDIAN_BYTES(speed_value, speed_cmd, 2);
+        writeInt32BigEndian(speed_value, speed_cmd, 2);
 
         if (!sendFrame(motor_id, speed_cmd, 8) ||
-            !receiveFrame(rx, motor_id) ||
+            !receiveFrameID(rx, motor_id) ||
             rx.data[0]!=0x02 || rx.data[1]!=0x09 || rx.data[2]!=0x01)
             return false;
 
@@ -647,10 +632,10 @@ public:
 
         // C. 构建指令 (0x01 0x08)
         uint8_t torque_cmd[8] = {0x01, 0x08, 0, 0, 0, 0, 0, 0};
-        TO_BIG_ENDIAN_BYTES(torque_param, torque_cmd, 2);
+        writeInt32BigEndian(torque_param, torque_cmd, 2);
 
         if (!sendFrame(motor_id, torque_cmd, 8) ||
-            !receiveFrame(rx, motor_id) ||
+            !receiveFrameID(rx, motor_id) ||
             rx.data[0]!=0x02 || rx.data[1]!=0x08 || rx.data[2]!=0x01)
             return false;
 
@@ -659,10 +644,10 @@ public:
         int32_t accel_value = static_cast<int32_t>(std::round(accel_rpm_s * 1092.0));
         
         uint8_t accel_cmd[8] = {0x01, 0x0B, 0, 0, 0, 0, 0, 0};
-        TO_BIG_ENDIAN_BYTES(accel_value, accel_cmd, 2);
+        writeInt32BigEndian(accel_value, accel_cmd, 2);
 
         if (!sendFrame(motor_id, accel_cmd, 8) ||
-            !receiveFrame(rx, motor_id) ||
+            !receiveFrameID(rx, motor_id) ||
             rx.data[0]!=0x02 || rx.data[1]!=0x0B || rx.data[2]!=0x01)
             return false;
 
@@ -671,10 +656,10 @@ public:
         int32_t decel_value = static_cast<int32_t>(std::round(decel_rpm_s * 1092.0));
         
         uint8_t decel_cmd[8] = {0x01, 0x0C, 0, 0, 0, 0, 0, 0};
-        TO_BIG_ENDIAN_BYTES(decel_value, decel_cmd, 2);
+        writeInt32BigEndian(decel_value, decel_cmd, 2);
 
         if (!sendFrame(motor_id, decel_cmd, 8) ||
-            !receiveFrame(rx, motor_id) ||
+            !receiveFrameID(rx, motor_id) ||
             rx.data[0]!=0x02 || rx.data[1]!=0x0C || rx.data[2]!=0x01)
             return false;
 
@@ -683,10 +668,10 @@ public:
         int32_t pos_pulse = static_cast<int32_t>(std::round(target_deg / 360.0 * 65536.0));
         
         uint8_t pos_cmd[8] = {0x01, 0x0A, 0, 0, 0, 0, 0, 0};
-        TO_BIG_ENDIAN_BYTES(pos_pulse, pos_cmd, 2);
+        writeInt32BigEndian(pos_pulse, pos_cmd, 2);
 
         if (!sendFrame(motor_id, pos_cmd, 8) ||
-            !receiveFrame(rx, motor_id) ||
+            !receiveFrameID(rx, motor_id) ||
             rx.data[0]!=0x02 || rx.data[1]!=0x0A || rx.data[2]!=0x01)
             return false;
 
@@ -755,7 +740,7 @@ public:
             0x00, 0x00
         };
         if (!sendFrame(motor_id, mode_cmd, 8)) return false;
-        if (!receiveFrame(rx, motor_id)) return false;
+        if (!receiveFrameID(rx, motor_id)) return false;
         // 校验回复 (02 0F 01 表示成功)
         if (rx.can_id != motor_id || 
             rx.data[0] != 0x02 || 
@@ -776,7 +761,7 @@ public:
         torque_cmd[6] = 0x00;
         torque_cmd[7] = 0x00;
         if (!sendFrame(motor_id, torque_cmd, 8)) return false;
-        if (!receiveFrame(rx, motor_id)) return false;
+        if (!receiveFrameID(rx, motor_id)) return false;
         // 校验回复 (02 08 01 表示成功)
         if (rx.can_id != motor_id || 
             rx.data[0] != 0x02 || 
@@ -806,7 +791,7 @@ public:
         /* Step 1-1: 01 3B 00 00 00 00 */
         uint8_t clear1[8] = {0x01, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
         if (!sendFrame(motor_id, clear1, 8) ||
-            !receiveFrame(rx, motor_id) ||
+            !receiveFrameID(rx, motor_id) ||
             rx.data[0] != 0x02 ||
             rx.data[1] != 0x3B ||
             rx.data[2] != 0x01)
@@ -815,7 +800,7 @@ public:
         /* Step 1-2: 03 3B 00 00 00 00 */
         uint8_t clear2[8] = {0x03, 0x3B, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
         if (!sendFrame(motor_id, clear2, 8) ||
-            !receiveFrame(rx, motor_id) ||
+            !receiveFrameID(rx, motor_id) ||
             rx.data[0] != 0x04 ||
             rx.data[1] != 0x3B)
             return false;
@@ -828,7 +813,7 @@ public:
 
         /* Step 2-1: 再次准备写偏移 */
         if (!sendFrame(motor_id, clear1, 8) ||
-            !receiveFrame(rx, motor_id) ||
+            !receiveFrameID(rx, motor_id) ||
             rx.data[0] != 0x02 ||
             rx.data[1] != 0x3B ||
             rx.data[2] != 0x01)
@@ -837,7 +822,7 @@ public:
         /* Step 2-2: 读取当前位置 03 07 */
         uint8_t read_pos[8] = {0x03, 0x07, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
         if (!sendFrame(motor_id, read_pos, 8) ||
-            !receiveFrame(rx, motor_id) ||
+            !receiveFrameID(rx, motor_id) ||
             rx.data[0] != 0x04 ||
             rx.data[1] != 0x07)
             return false;
@@ -874,7 +859,7 @@ public:
         };
 
         if (!sendFrame(motor_id, write_offset, 8) ||
-            !receiveFrame(rx, motor_id) ||
+            !receiveFrameID(rx, motor_id) ||
             rx.data[0] != 0x02 ||
             rx.data[1] != 0x3B ||
             rx.data[2] != 0x01)
@@ -882,7 +867,7 @@ public:
 
         /* Step 2-4: 读回确认 03 3B */
         if (!sendFrame(motor_id, clear2, 8) ||
-            !receiveFrame(rx, motor_id) ||
+            !receiveFrameID(rx, motor_id) ||
             rx.data[0] != 0x04 ||
             rx.data[1] != 0x3B)
             return false;
@@ -895,7 +880,7 @@ public:
 
         uint8_t save_cmd[8] = {0x01, 0x4D, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00};
         if (!sendFrame(motor_id, save_cmd, 8) ||
-            !receiveFrame(rx, motor_id) ||
+            !receiveFrameID(rx, motor_id) ||
             rx.data[0] != 0x02 ||
             rx.data[1] != 0x4B ||
             rx.data[2] != 0x01)
@@ -952,16 +937,6 @@ public:
 
         struct can_frame rx {};
 
-        /* --- 辅助宏：安全的大端序转换 (32-bit Signed) --- */
-        #define TO_BIG_ENDIAN_BYTES(val, arr, offset) \
-            do { \
-                uint32_t uval = static_cast<uint32_t>(val); \
-                arr[offset]   = (uval >> 24) & 0xFF; \
-                arr[offset+1] = (uval >> 16) & 0xFF; \
-                arr[offset+2] = (uval >> 8)  & 0xFF; \
-                arr[offset+3] = (uval)       & 0xFF; \
-            } while(0)
-
         /* --- 辅助函数：获取额定扭矩 --- */
         auto getRatedTorque = [](uint8_t id) -> float {
             switch (id) {
@@ -972,11 +947,18 @@ public:
             }
         };
 
-        // ==========================================
-        // PHASE 1: 配置运动参数 (不触发运动)
-        // ==========================================
-        // 此阶段所有电机接收完参数后，处于"就绪但未动"状态
-        for (size_t i = 0; i < count; ++i) {
+        const bool profile_changed =
+            !profile_position_configured_ ||
+            motor_ids != configured_motor_ids_ ||
+            speed_rad_s_list != configured_speed_rad_s_ ||
+            target_torques_nm != configured_torques_nm_ ||
+            accel_rad_s2_list != configured_accel_rad_s2_ ||
+            decel_rad_s2_list != configured_decel_rad_s2_;
+
+        // 运动参数只在首次调用或参数变化时配置，周期写入只发送目标位置。
+        if (profile_changed) {
+          profile_position_configured_ = false;
+          for (size_t i = 0; i < count; ++i) {
             uint8_t motor_id = motor_ids[i];
             
             // --- 步骤 1: 工作模式 Profile Position (0x01) ---
@@ -985,7 +967,7 @@ public:
                 std::cerr << "[MotorCAN] Phase 1 Failed to send mode cmd to motor " << (int)motor_id << "\n";
                 return false;
             }
-            if (!receiveFrame(rx, motor_id) || rx.data[0]!=0x02 || rx.data[1]!=0x0F || rx.data[2]!=0x01) {
+            if (!receiveFrameID(rx, motor_id) || rx.data[0]!=0x02 || rx.data[1]!=0x0F || rx.data[2]!=0x01) {
                 std::cerr << "[MotorCAN] Phase 1 Mode cmd response error on motor " << (int)motor_id << "\n";
                 return false;
             }
@@ -995,10 +977,10 @@ public:
             int32_t speed_value = static_cast<int32_t>(std::round(speed_rpm * 1092.0));
             
             uint8_t speed_cmd[8] = {0x01, 0x09, 0, 0, 0, 0, 0, 0};
-            TO_BIG_ENDIAN_BYTES(speed_value, speed_cmd, 2);
+            writeInt32BigEndian(speed_value, speed_cmd, 2);
 
             if (!sendFrame(motor_id, speed_cmd, 8) ||
-                !receiveFrame(rx, motor_id) ||
+                !receiveFrameID(rx, motor_id) ||
                 rx.data[0]!=0x02 || rx.data[1]!=0x09 || rx.data[2]!=0x01) {
                 std::cerr << "[MotorCAN] Phase 1 Speed cmd error on motor " << (int)motor_id << "\n";
                 return false;
@@ -1015,10 +997,10 @@ public:
             int32_t torque_param = static_cast<int32_t>(std::round(ratio * 1000.0f));
 
             uint8_t torque_cmd[8] = {0x01, 0x08, 0, 0, 0, 0, 0, 0};
-            TO_BIG_ENDIAN_BYTES(torque_param, torque_cmd, 2);
+            writeInt32BigEndian(torque_param, torque_cmd, 2);
 
             if (!sendFrame(motor_id, torque_cmd, 8) ||
-                !receiveFrame(rx, motor_id) ||
+                !receiveFrameID(rx, motor_id) ||
                 rx.data[0]!=0x02 || rx.data[1]!=0x08 || rx.data[2]!=0x01) {
                 std::cerr << "[MotorCAN] Phase 1 Torque cmd error on motor " << (int)motor_id << "\n";
                 return false;
@@ -1029,10 +1011,10 @@ public:
             int32_t accel_value = static_cast<int32_t>(std::round(accel_rpm_s * 1092.0));
             
             uint8_t accel_cmd[8] = {0x01, 0x0B, 0, 0, 0, 0, 0, 0};
-            TO_BIG_ENDIAN_BYTES(accel_value, accel_cmd, 2);
+            writeInt32BigEndian(accel_value, accel_cmd, 2);
 
             if (!sendFrame(motor_id, accel_cmd, 8) ||
-                !receiveFrame(rx, motor_id) ||
+                !receiveFrameID(rx, motor_id) ||
                 rx.data[0]!=0x02 || rx.data[1]!=0x0B || rx.data[2]!=0x01) {
                 std::cerr << "[MotorCAN] Phase 1 Accel cmd error on motor " << (int)motor_id << "\n";
                 return false;
@@ -1043,16 +1025,23 @@ public:
             int32_t decel_value = static_cast<int32_t>(std::round(decel_rpm_s * 1092.0));
             
             uint8_t decel_cmd[8] = {0x01, 0x0C, 0, 0, 0, 0, 0, 0};
-            TO_BIG_ENDIAN_BYTES(decel_value, decel_cmd, 2);
+            writeInt32BigEndian(decel_value, decel_cmd, 2);
 
             if (!sendFrame(motor_id, decel_cmd, 8) ||
-                !receiveFrame(rx, motor_id) ||
+                !receiveFrameID(rx, motor_id) ||
                 rx.data[0]!=0x02 || rx.data[1]!=0x0C || rx.data[2]!=0x01) {
                 std::cerr << "[MotorCAN] Phase 1 Decel cmd error on motor " << (int)motor_id << "\n";
                 return false;
             }
             
-            // 【注意】此处故意跳过步骤6 (目标位置)，等待Phase 2统一触发
+          }
+
+          configured_motor_ids_ = motor_ids;
+          configured_speed_rad_s_ = speed_rad_s_list;
+          configured_torques_nm_ = target_torques_nm;
+          configured_accel_rad_s2_ = accel_rad_s2_list;
+          configured_decel_rad_s2_ = decel_rad_s2_list;
+          profile_position_configured_ = true;
         }
 
         // ==========================================
@@ -1068,10 +1057,10 @@ public:
             int32_t pos_pulse = static_cast<int32_t>(std::round(target_deg / 360.0 * 65536.0));
             
             uint8_t pos_cmd[8] = {0x01, 0x0A, 0, 0, 0, 0, 0, 0};
-            TO_BIG_ENDIAN_BYTES(pos_pulse, pos_cmd, 2);
+            writeInt32BigEndian(pos_pulse, pos_cmd, 2);
 
             if (!sendFrame(motor_id, pos_cmd, 8) ||
-                !receiveFrame(rx, motor_id) ||
+                !receiveFrameID(rx, motor_id) ||
                 rx.data[0]!=0x02 || rx.data[1]!=0x0A || rx.data[2]!=0x01) {
                 std::cerr << "[MotorCAN] Phase 2 Pos cmd error on motor " << (int)motor_id << "\n";
                 // 注意：如果这里失败，前面的电机可能已经动了，后面的没动。
@@ -1084,8 +1073,23 @@ public:
     }
 
 private:
+    static void writeInt32BigEndian(int32_t value, uint8_t* data, size_t offset)
+    {
+        const uint32_t bits = static_cast<uint32_t>(value);
+        data[offset] = static_cast<uint8_t>((bits >> 24) & 0xFF);
+        data[offset + 1] = static_cast<uint8_t>((bits >> 16) & 0xFF);
+        data[offset + 2] = static_cast<uint8_t>((bits >> 8) & 0xFF);
+        data[offset + 3] = static_cast<uint8_t>(bits & 0xFF);
+    }
+
     std::string can_name_;
     int socket_fd_;
+    bool profile_position_configured_ = false;
+    std::vector<uint8_t> configured_motor_ids_;
+    std::vector<double> configured_speed_rad_s_;
+    std::vector<float> configured_torques_nm_;
+    std::vector<double> configured_accel_rad_s2_;
+    std::vector<double> configured_decel_rad_s2_;
 };
 
 #endif // MOTOR_CAN_H

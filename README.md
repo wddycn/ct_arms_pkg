@@ -5,7 +5,7 @@
 # 机械臂硬件连接
 两条机械臂各自分别占用jetson orin nano的一个usb接口
 
-连接时需要确保can1接左臂，can2接右臂
+连接时需要确保can1接左臂（2、3、4、5、6、7），can2接右臂（8、9、10、11、12、13）
 
 ![alt text](image.png)
 
@@ -35,15 +35,15 @@ colcon build
 ！！！**需要为jetson连接屏幕、鼠标、键盘**
 
 ## 方式一：ros2_control
-三个功能包编译完成后在终端输入
+三个功能包编译完成后，在终端输入
 
 ```bash
 source ros2_ws/install/setup.bash
 ros2 launch eyou_ros2_control eyou_control.launch.py 
 ```
-启动成功后，正常情况下机械臂会回到初始位置，并使能（变硬）
+启动成功后，正常情况下机械臂会在当前（任意）姿态固定并使能（变硬）
 
-![alt text](image-1.png)
+![alt text](91599d4d8ebfb14922409f41f538f105.jpg)
 
 新建终端，输入以下命令进行机械臂角度控制（角度可更改，单位：rad）
 ```bash
@@ -70,6 +70,11 @@ ros2 topic pub --once /right_arm_controller/joint_trajectory trajectory_msgs/msg
   ]
 }'
 ```
+**！！！注明，以下姿态为电机默认零位，可通过源码进行更改**
+
+电机逆时针为正旋转
+
+![alt text](image-1.png)
 ## 方式二：C++源码控制
 - src/eyou_ros2_control/c++源码/eyou.h 当中已经封装好了基于can通信的控制函数
 - src/eyou_ros2_control/c++源码/eyou.cpp 是一些调用示例

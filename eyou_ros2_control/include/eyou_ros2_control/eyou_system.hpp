@@ -43,6 +43,8 @@ private:
   // 原有
   std::vector<double> joint_pos_state_;
   std::vector<double> joint_pos_cmd_;
+  std::vector<double> last_sent_pos_cmd_;
+  bool has_sent_pos_cmd_ = false;
   // 新增速度、力矩存储
   std::vector<double> joint_vel_state_;
   std::vector<double> joint_eff_state_;
@@ -59,13 +61,10 @@ private:
 
   bool connect_motor_bus();
   void disconnect_motor_bus();
-  void read_all_motor_pos(std::vector<double>& pos_rad,
-                          std::vector<double>& vel_rad,
-                          std::vector<double>& eff_rad);
-  void send_all_motor_target(const std::vector<double>& cmd_rad);
-
-  inline double deg2rad(double deg) { return deg * M_PI / 180.0; }
-  inline double rad2deg(double rad) { return rad * 180.0 / M_PI; }
+  bool read_all_motor_states(std::vector<double>& pos_rad,
+                             std::vector<double>& vel_rad,
+                             std::vector<double>& effort);
+  bool send_all_motor_targets(const std::vector<double>& cmd_rad);
 };
 }  // namespace eyou_ros2_control
 

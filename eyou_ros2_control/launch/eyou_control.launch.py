@@ -1,5 +1,4 @@
 from launch import LaunchDescription
-from launch.actions import ExecuteProcess
 from launch.substitutions import Command, PathJoinSubstitution
 from launch_ros.actions import Node
 from launch_ros.substitutions import FindPackageShare
@@ -31,24 +30,22 @@ def generate_launch_description():
         output="screen"
     )
 
-    # 加载控制器
-    load_joint_state_broadcaster = ExecuteProcess(
-        cmd=["ros2", "control", "load_controller", "--set-state", "active", "joint_state_broadcaster"],
-        output="screen"
-    )
-    load_left_arm_ctrl = ExecuteProcess(
-        cmd=["ros2", "control", "load_controller", "--set-state", "active", "left_arm_controller"],
-        output="screen"
-    )
-    load_right_arm_ctrl = ExecuteProcess(
-        cmd=["ros2", "control", "load_controller", "--set-state", "active", "right_arm_controller"],
+    # spawner 会等待 controller_manager 服务就绪，再按给定顺序加载控制器。
+    controller_spawner = Node(
+        package="controller_manager",
+        executable="spawner",
+        arguments=[
+            "joint_state_broadcaster",
+            "left_arm_controller",
+            "right_arm_controller",
+            "--controller-manager",
+            "/controller_manager",
+        ],
         output="screen"
     )
 
     return LaunchDescription([
         robot_state_pub,
         controller_manager,
-        load_joint_state_broadcaster,
-        load_left_arm_ctrl,
-        load_right_arm_ctrl
+        controller_spawner
     ])

@@ -748,50 +748,74 @@
     <joint name="joint1">
       <command_interface name="position"/>
       <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
     <joint name="joint2">
       <command_interface name="position"/>
       <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
     <joint name="joint3">
       <command_interface name="position"/>
       <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
     <joint name="joint4">
       <command_interface name="position"/>
       <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
     <joint name="joint5">
       <command_interface name="position"/>
       <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
     <joint name="joint6">
       <command_interface name="position"/>
       <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
     <joint name="joint7">
       <command_interface name="position"/>
       <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
     <joint name="joint8">
       <command_interface name="position"/>
       <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
     <joint name="joint9">
       <command_interface name="position"/>
       <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
     <joint name="joint10">
       <command_interface name="position"/>
       <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
     <joint name="joint11">
       <command_interface name="position"/>
       <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
     <joint name="joint12">
       <command_interface name="position"/>
       <state_interface name="position"/>
+      <state_interface name="velocity"/>
+      <state_interface name="effort"/>
     </joint>
   </ros2_control>
 </robot>
